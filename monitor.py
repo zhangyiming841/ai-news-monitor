@@ -6,13 +6,13 @@ import re
 import time
 
 FEEDS = {
-    "OpenAI":         "https://openai.com/blog/rss.xml",
-    "Anthropic":      "https://www.anthropic.com/rss.xml",
-    "Google DeepMind":"https://deepmind.google/discover/blog/rss/",
-    "Google AI":      "https://blog.google/technology/ai/rss/",
-    "Meta AI":        "https://ai.meta.com/blog/feed/",
-    "Mistral AI":     "https://mistral.ai/feed/",
-    "xAI":            "https://x.ai/news/rss.xml",
+    "OpenAI":        "https://openai.com/blog/rss.xml",
+    "Anthropic":     "https://techcrunch.com/tag/anthropic/feed/",
+    "Google DeepMind": "https://techcrunch.com/tag/google-deepmind/feed/",
+    "Google AI":     "https://blog.google/technology/ai/rss/",
+    "Mistral AI":    "https://techcrunch.com/tag/mistral/feed/",
+    "xAI":           "https://techcrunch.com/tag/xai/feed/",
+    "HuggingFace":   "https://huggingface.co/blog/feed.xml",
 }
 
 FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "")
@@ -137,7 +137,9 @@ def main():
     for source, feed_url in FEEDS.items():
         try:
             print(f"检查 {source} ...")
-            feed = feedparser.parse(feed_url)
+            feed = feedparser.parse(feed_url, request_headers={
+                "User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)"
+            })
 
             if not feed.entries:
                 print(f"  无内容 (bozo={feed.bozo})")
