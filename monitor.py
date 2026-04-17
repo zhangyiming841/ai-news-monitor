@@ -9,7 +9,7 @@ FEEDS = {
     "OpenAI":         "https://openai.com/blog/rss.xml",
     "Anthropic":      "https://www.anthropic.com/rss.xml",
     "Google DeepMind":"https://deepmind.google/discover/blog/rss/",
-    "Google AI Blog": "https://blog.google/technology/ai/rss/",
+    "Google AI":      "https://blog.google/technology/ai/rss/",
     "Meta AI":        "https://ai.meta.com/blog/feed/",
     "Mistral AI":     "https://mistral.ai/feed/",
     "xAI":            "https://x.ai/news/rss.xml",
@@ -18,6 +18,7 @@ FEEDS = {
 FEISHU_WEBHOOK = os.environ.get("FEISHU_WEBHOOK", "")
 STATE_FILE = "seen_ids.json"
 MAX_SEEN = 2000
+MAX_PER_RUN = 8  # 每次最多推送条数
 
 
 def load_seen():
@@ -41,41 +42,79 @@ def strip_html(text):
     return text
 
 
-def truncate(text, n=220):
+def truncate(text, n=150):
     return text[:n] + "..." if len(text) > n else text
 
 
-def send_feishu(source, title, link, summary):
-    summary_clean = truncate(strip_html(summary))
+def translate(text):
+    """使用 Google 翻译免费接口翻译成中文"""
+    if not text:
+        return ""
+    try:
+        url = "https://translate.googleapis.com/translate_a/single"
+        params = {
+            "client": "gtx",
+            "sl": "auto",
+            "tl": "zh-CN",
+            "dt": "t",
+            "q": text[:500],
+        }
+        resp = requests.get(url, params=params, timeout=10)
+        result = resp.json()
+        translated = "".join(part[0] for part in result[0] if part[0])
+        return translated
+    except Exception as e:
+        print(f"  翻译失败: {e}")
+        return text
 
-    content_md = f"**{title}**"
-    if summary_clean:
-        content_md += f"\n\n{summary_clean}"
 
+def send_feishu_batch(items):
+    """将多条新闻合并成一条飞书卡片推送"""
+    if not items:
+        return
+
+    elements = []
+    for i, (source, title, link, summary) in enumerate(items):
+        # 翻译标题和摘要
+        title_cn = translate(title)
+        summary_cn = truncate(translate(strip_html(summary))) if summary else ""
+
+        content = f"**[{source}]** {title_cn}"
+        if summary_cn:
+            content += f"\n{summary_cn}"
+
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": content,
+            },
+        })
+        elements.append({
+            "tag": "action",
+            "actions": [{
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "查看原文 →"},
+                "url": link,
+                "type": "default",
+            }],
+        })
+        # 分隔线（最后一条不加）
+        if i < len(items) - 1:
+            elements.append({"tag": "hr"})
+
+    count = len(items)
     card = {
         "msg_type": "interactive",
         "card": {
             "header": {
-                "title": {"tag": "plain_text", "content": f"🚀 {source} 最新动态"},
+                "title": {
+                    "tag": "plain_text",
+                    "content": f"🤖 AI 最新动态 · {count} 条新消息",
+                },
                 "template": "blue",
             },
-            "elements": [
-                {
-                    "tag": "div",
-                    "text": {"tag": "lark_md", "content": content_md},
-                },
-                {
-                    "tag": "action",
-                    "actions": [
-                        {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": "查看原文 →"},
-                            "url": link,
-                            "type": "primary",
-                        }
-                    ],
-                },
-            ],
+            "elements": elements,
         },
     }
 
@@ -83,25 +122,25 @@ def send_feishu(source, title, link, summary):
     resp.raise_for_status()
     result = resp.json()
     if result.get("code") != 0:
-        print(f"  [Feishu Error] {result}")
+        print(f"  [飞书错误] {result}")
 
 
 def main():
     if not FEISHU_WEBHOOK:
-        print("FEISHU_WEBHOOK not set, exiting.")
+        print("FEISHU_WEBHOOK 未设置，退出。")
         return
 
     seen = load_seen()
     new_seen = set(seen)
-    new_count = 0
+    new_items = []  # (source, title, link, summary)
 
     for source, feed_url in FEEDS.items():
         try:
-            print(f"Checking {source} ...")
+            print(f"检查 {source} ...")
             feed = feedparser.parse(feed_url)
 
             if not feed.entries:
-                print(f"  No entries (bozo={feed.bozo})")
+                print(f"  无内容 (bozo={feed.bozo})")
                 continue
 
             for entry in feed.entries[:10]:
@@ -109,25 +148,34 @@ def main():
                 if not uid or uid in seen:
                     continue
 
-                title = entry.get("title", "(no title)")
+                title = entry.get("title", "(无标题)")
                 link = entry.get("link", feed_url)
                 summary = entry.get("summary") or entry.get("description", "")
 
-                print(f"  NEW: {title}")
-                try:
-                    send_feishu(source, title, link, summary)
-                    new_count += 1
-                    time.sleep(1)
-                except Exception as e:
-                    print(f"  Send failed: {e}")
-
+                print(f"  新内容: {title}")
+                new_items.append((source, title, link, summary))
                 new_seen.add(uid)
 
+                if len(new_items) >= MAX_PER_RUN:
+                    break
+
         except Exception as e:
-            print(f"Error on {source}: {e}")
+            print(f"检查 {source} 出错: {e}")
+
+        if len(new_items) >= MAX_PER_RUN:
+            break
+
+    if new_items:
+        print(f"\n共 {len(new_items)} 条新内容，翻译并推送中...")
+        try:
+            send_feishu_batch(new_items)
+            print("推送成功！")
+        except Exception as e:
+            print(f"推送失败: {e}")
+    else:
+        print("无新内容。")
 
     save_seen(new_seen)
-    print(f"\nDone. {new_count} new item(s) pushed.")
 
 
 if __name__ == "__main__":
